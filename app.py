@@ -106,11 +106,11 @@ if check_password():
 
     st.sidebar.header('Model Selection')
     model_options = [
-        "google/gemini-flash-1.5",
-        "anthropic/claude-3.5-sonnet",
-        "openai/gpt-4o",
-        "openai/gpt-4o-mini",
-        "google/gemini-pro-1.5"
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-pro",
+        "openai/gpt-4.1",
+        "openai/gpt-4.1-mini",
+        "anthropic/claude-3.7-sonnet"
     ]
     selected_model = st.sidebar.selectbox("Choose a model", model_options, index=0)
 
