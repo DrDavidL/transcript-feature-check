@@ -16,14 +16,20 @@ def get_llm_response(transcript_text, features, model):
     )
     
     prompt = f"""
-    Given the following transcript and a list of features, please determine if each feature is present in the transcript.
-    Respond with a JSON object where the keys are the features and the values are "Addressed" or "Not Addressed".
+  Given the following clinical transcript and list of features, determine whether each feature has been explicitly addressed in the transcript.
 
-    Transcript:
-    {transcript_text}
+A feature is considered **"Addressed"** if the transcript provides any relevant information affirming, denying, or otherwise commenting on the feature — even if only partially or indirectly (e.g., "no difficulty swallowing" would Address "dysphagia").
 
-    Features:
-    {features}
+A feature is considered **"Not Addressed"** if it is not mentioned or inferable at all. Importantly, if the transcript provides information about a related feature but not the one in question (e.g., mentions improvement with cold foods but no mention of hot foods), then the unmentioned feature is still marked as **"Not Addressed"**.
+
+Respond in JSON format, where each key is a feature and each value is either `"Addressed"` or `"Not Addressed"`.
+
+Transcript:
+{transcript_text}
+
+Features:
+{features}
+
     """
 
     completion = client.chat.completions.create(
