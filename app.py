@@ -122,9 +122,18 @@ def validate_feature_lr_matrix(df: pd.DataFrame) -> bool:
     return True
 
 def validate_prior_probabilities(priors: Dict[str, float]) -> bool:
-    """Validate that prior probabilities sum to 1.0 (within tolerance)."""
-    total = sum(priors.values())
-    return abs(total - 1.0) < 0.001
+    """Validate prior probabilities.
+    
+    For single diagnostic category: Any positive value is valid (represents pretest probability)
+    For multiple categories: Must sum to 1.0 (competing diagnoses)
+    """
+    if len(priors) == 1:
+        # Single category: just needs to be positive (will be used as pretest probability)
+        return all(prob > 0 for prob in priors.values())
+    else:
+        # Multiple categories: must sum to 1.0
+        total = sum(priors.values())
+        return abs(total - 1.0) < 0.001
 
 def calculate_entropy(probabilities: np.ndarray) -> float:
     """Calculate entropy using log base 2: -Σ(p * log₂(p))"""
@@ -143,50 +152,65 @@ def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray
     """
     Perform Bayesian belief updating with likelihood ratios.
     
-    CRITICAL MATHEMATICAL NOTE:
-    The current implementation treats likelihood ratios as if they were likelihoods.
-    This is mathematically incorrect for true likelihood ratios.
+    SINGLE CATEGORY: Uses binary Bayesian updating (disease vs no disease)
+    MULTIPLE CATEGORIES: Uses multi-category normalization approach
     
-    TRUE LIKELIHOOD RATIOS are defined as:
-    LR = P(evidence|disease) / P(evidence|no disease)
+    For single category with pretest probability P:
+    - Uses odds form: posterior_odds = prior_odds × LR
+    - Returns probability of the single diagnosis
     
-    For proper Bayesian updating with LRs, we should use:
-    posterior_odds = prior_odds × LR
-    
-    However, the data structure suggests these may be "relative likelihood ratios"
-    or evidence weights rather than true statistical likelihood ratios.
-    
-    CURRENT IMPLEMENTATION (potentially incorrect):
-    posterior ∝ prior × LR_value
-    
-    This assumes LR_values represent relative evidence strength, not true LRs.
+    For multiple categories:
+    - Treats LR values as relative evidence weights
+    - Normalizes across all categories
     """
     
     # Validate inputs
     if len(prior_probs) != len(likelihood_ratios):
         raise ValueError("Prior probabilities and likelihood ratios must have same length")
     
-    if not np.allclose(np.sum(prior_probs), 1.0, atol=1e-6):
-        raise ValueError("Prior probabilities must sum to 1.0")
-    
     if np.any(likelihood_ratios <= 0):
         raise ValueError("Likelihood ratios must be positive")
     
-    # CURRENT APPROACH: Treat LR values as relative evidence weights
-    # This may be incorrect depending on how the LRs were derived
-    unnormalized_posterior = prior_probs * likelihood_ratios
-    
-    # Calculate normalization constant
-    normalization_constant = np.sum(unnormalized_posterior)
-    
-    # Ensure we don't divide by zero
-    if normalization_constant == 0:
-        raise ValueError("Normalization constant is zero - check likelihood ratio values")
-    
-    # Calculate normalized posterior
-    posterior_probs = unnormalized_posterior / normalization_constant
-    
-    return posterior_probs, normalization_constant
+    # Handle single vs multiple categories differently
+    if len(prior_probs) == 1:
+        # SINGLE CATEGORY: Binary Bayesian updating
+        if np.any(prior_probs <= 0):
+            raise ValueError("Prior probability must be positive")
+        
+        prior_prob = prior_probs[0]
+        lr = likelihood_ratios[0]
+        
+        # Convert to odds form for proper LR application
+        prior_odds = prior_prob / (1 - prior_prob)
+        posterior_odds = prior_odds * lr
+        posterior_prob = posterior_odds / (1 + posterior_odds)
+        
+        return np.array([posterior_prob]), posterior_odds
+        
+    else:
+        # MULTIPLE CATEGORIES: Multi-category normalization
+        prior_sum = np.sum(prior_probs)
+        
+        # Auto-normalize priors if they're close to 1.0 but not exact (handles rounding errors)
+        if abs(prior_sum - 1.0) < 0.02:  # Allow up to 2% deviation
+            prior_probs = prior_probs / prior_sum  # Normalize to sum to 1.0
+        elif not np.allclose(prior_sum, 1.0, atol=1e-6):
+            raise ValueError(f"Prior probabilities must sum to 1.0. Current sum: {prior_sum:.6f}")
+        
+        # Treat LR values as relative evidence weights
+        unnormalized_posterior = prior_probs * likelihood_ratios
+        
+        # Calculate normalization constant
+        normalization_constant = np.sum(unnormalized_posterior)
+        
+        # Ensure we don't divide by zero
+        if normalization_constant == 0:
+            raise ValueError("Normalization constant is zero - check likelihood ratio values")
+        
+        # Calculate normalized posterior
+        posterior_probs = unnormalized_posterior / normalization_constant
+        
+        return posterior_probs, normalization_constant
 
 def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFrame,
                               prior_probs: Dict[str, float], model: str) -> Dict[str, Any]:
@@ -478,7 +502,10 @@ if check_password():
                 
                 # Step 2: Set Prior Probabilities
                 st.header('Step 2: Set Prior Probabilities')
-                st.write("Enter the prior probability for each diagnostic category. Values must sum to 1.0.")
+                if len(diagnostic_categories) == 1:
+                    st.write("Enter the pretest probability for the diagnostic category (any positive value, e.g., 0.35 for 35%).")
+                else:
+                    st.write("Enter the prior probability for each diagnostic category. Values must sum to 1.0.")
                 
                 # Create input fields for prior probabilities
                 prior_probs = {}
@@ -499,7 +526,10 @@ if check_password():
                 
                 # Validate prior probabilities
                 if validate_prior_probabilities(prior_probs):
-                    st.success(f"✅ Prior probabilities sum to {sum(prior_probs.values()):.3f}")
+                    if len(diagnostic_categories) == 1:
+                        st.success(f"✅ Pretest probability set to {list(prior_probs.values())[0]:.3f} ({list(prior_probs.values())[0]*100:.1f}%)")
+                    else:
+                        st.success(f"✅ Prior probabilities sum to {sum(prior_probs.values()):.3f}")
                     
                     # Step 3: Upload Transcripts
                     st.header('Step 3: Upload Transcripts')
@@ -558,7 +588,10 @@ if check_password():
                                     mime="application/zip"
                                 )
                 else:
-                    st.error(f"❌ Prior probabilities must sum to 1.0. Current sum: {sum(prior_probs.values()):.3f}")
+                    if len(diagnostic_categories) == 1:
+                        st.error(f"❌ Pretest probability must be positive. Current value: {list(prior_probs.values())[0]:.3f}")
+                    else:
+                        st.error(f"❌ Prior probabilities must sum to 1.0. Current sum: {sum(prior_probs.values()):.3f}")
             else:
                 st.error("❌ Invalid Feature-LR matrix. Please ensure all LR values are positive numbers.")
         except Exception as e:

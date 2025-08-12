@@ -24,7 +24,9 @@ Upload a CSV or Excel file with:
 - **Remaining columns**: Diagnostic categories with likelihood ratio values
 
 ### Step 2: Set Prior Probabilities
-Enter prior probabilities for each diagnostic category. Values must sum to 1.0.
+**For Multiple Diagnostic Categories**: Enter prior probabilities for each category. Values must sum to 1.0.
+
+**For Single Diagnostic Category**: Enter the pretest probability (any positive value, e.g., 0.35 for 35%). The system will use binary Bayesian updating (target diagnosis vs. "everything else").
 
 ### Step 3: Upload Transcripts
 Upload PDF transcript files for analysis.
@@ -101,39 +103,68 @@ numpy
 ## Mathematical Background
 
 ### Belief Updating Process
-1. **Prior Probabilities**: Initial diagnostic category probabilities (π)
+
+**For Multiple Diagnostic Categories:**
+1. **Prior Probabilities**: Initial diagnostic category probabilities (π) - must sum to 1.0
 2. **Likelihood Ratios**: Evidence strength for each feature (LR)
 3. **Unnormalized Posterior**: π × LR
 4. **Normalization**: Divide by sum to ensure probabilities sum to 1
 5. **Posterior Probabilities**: Updated beliefs (q)
 
+**For Single Diagnostic Category:**
+1. **Pretest Probability**: Initial probability of the target diagnosis (any positive value)
+2. **Likelihood Ratios**: Evidence strength for each feature (LR)
+3. **Odds Conversion**: Convert pretest probability to odds
+4. **Odds Updating**: posterior_odds = prior_odds × LR
+5. **Probability Conversion**: Convert back to probability using binary Bayesian updating
+
 ### Mathematical Implementation Details
 
-**Current Approach:**
+**For Multiple Categories:**
 ```
 posterior ∝ prior × LR_value
 posterior = (prior × LR) / Σ(prior × LR)
 ```
 
-**Important Note:** This implementation treats LR values as relative evidence weights rather than true statistical likelihood ratios. This approach is mathematically sound when:
-- LR values represent relative diagnostic strength
+**For Single Category (Binary Updating):**
+```
+prior_odds = pretest_prob / (1 - pretest_prob)
+posterior_odds = prior_odds × LR
+posterior_prob = posterior_odds / (1 + posterior_odds)
+```
+
+**Important Notes:**
+- **Multiple categories**: LR values treated as relative evidence weights
+- **Single category**: Uses proper binary Bayesian updating with odds form
 - Values > 1 indicate evidence supporting the diagnosis
 - Values < 1 indicate evidence against the diagnosis
 - Values = 1 indicate neutral evidence
 
 **For Manual Verification:**
-To manually verify calculations:
+
+**Multiple Categories:**
 1. Multiply each prior probability by its corresponding LR value
 2. Sum all products to get the normalization constant
 3. Divide each product by the normalization constant
 4. Results should match the application output
 
-**Example Calculation:**
-For feature "Patient Has: food gets stuck" with uniform priors (0.125):
+**Single Category:**
+1. Convert pretest probability to odds: odds = prob / (1 - prob)
+2. Multiply odds by LR: new_odds = odds × LR
+3. Convert back to probability: new_prob = new_odds / (1 + new_odds)
+
+**Example Calculations:**
+
+**Multiple Categories** - Feature "Patient Has: food gets stuck" with uniform priors (0.125):
 - Gastroesophageal: 0.125 × 6.0 = 0.75
 - Cardiovascular: 0.125 × 0.3 = 0.0375
 - Sum all products = 1.4625
 - Final probability = 0.75 / 1.4625 = 0.513 (51.3%)
+
+**Single Category** - 35% pretest probability with LR = 6.0:
+- Prior odds: 0.35 / (1 - 0.35) = 0.538
+- Posterior odds: 0.538 × 6.0 = 3.23
+- Posterior probability: 3.23 / (1 + 3.23) = 0.764 (76.4%)
 
 ### Information Theory Metrics
 - **Entropy**: Measures uncertainty in probability distribution
@@ -154,7 +185,7 @@ Features are processed one at a time, with each posterior becoming the prior for
 The application includes robust error handling for:
 - Invalid file formats
 - Mathematical edge cases (log of zero)
-- Prior probability validation
+- Prior probability validation (different rules for single vs. multiple categories)
 - LLM response parsing
 - File processing errors
 
