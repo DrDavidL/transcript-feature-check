@@ -140,19 +140,55 @@ def calculate_kl_divergence(posterior: np.ndarray, prior: np.ndarray) -> float:
     return np.sum(posterior * np.log2(posterior / prior))
 
 def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray) -> Tuple[np.ndarray, float]:
-    """Perform Bayesian belief updating."""
-    # Calculate unnormalized posterior: prior * LR
+    """
+    Perform Bayesian belief updating with likelihood ratios.
+    
+    CRITICAL MATHEMATICAL NOTE:
+    The current implementation treats likelihood ratios as if they were likelihoods.
+    This is mathematically incorrect for true likelihood ratios.
+    
+    TRUE LIKELIHOOD RATIOS are defined as:
+    LR = P(evidence|disease) / P(evidence|no disease)
+    
+    For proper Bayesian updating with LRs, we should use:
+    posterior_odds = prior_odds × LR
+    
+    However, the data structure suggests these may be "relative likelihood ratios"
+    or evidence weights rather than true statistical likelihood ratios.
+    
+    CURRENT IMPLEMENTATION (potentially incorrect):
+    posterior ∝ prior × LR_value
+    
+    This assumes LR_values represent relative evidence strength, not true LRs.
+    """
+    
+    # Validate inputs
+    if len(prior_probs) != len(likelihood_ratios):
+        raise ValueError("Prior probabilities and likelihood ratios must have same length")
+    
+    if not np.allclose(np.sum(prior_probs), 1.0, atol=1e-6):
+        raise ValueError("Prior probabilities must sum to 1.0")
+    
+    if np.any(likelihood_ratios <= 0):
+        raise ValueError("Likelihood ratios must be positive")
+    
+    # CURRENT APPROACH: Treat LR values as relative evidence weights
+    # This may be incorrect depending on how the LRs were derived
     unnormalized_posterior = prior_probs * likelihood_ratios
     
     # Calculate normalization constant
     normalization_constant = np.sum(unnormalized_posterior)
+    
+    # Ensure we don't divide by zero
+    if normalization_constant == 0:
+        raise ValueError("Normalization constant is zero - check likelihood ratio values")
     
     # Calculate normalized posterior
     posterior_probs = unnormalized_posterior / normalization_constant
     
     return posterior_probs, normalization_constant
 
-def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFrame, 
+def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFrame,
                               prior_probs: Dict[str, float], model: str) -> Dict[str, Any]:
     """Process transcript features sequentially and calculate belief updates."""
     
@@ -194,18 +230,24 @@ def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFram
             kl_divergence = calculate_kl_divergence(new_probs, current_probs)
             cumulative_kl += kl_divergence
             
-            # Store step information
+            # Store step information with detailed calculation breakdown
             step_info = {
                 'step': i + 1,
                 'feature': feature,
                 'prior_probs': current_probs.copy(),
                 'likelihood_ratios': lr_values.copy(),
+                'unnormalized_posterior': current_probs * lr_values,  # For debugging
                 'posterior_probs': new_probs.copy(),
                 'entropy_before': entropy_before,
                 'entropy_after': entropy_after,
                 'entropy_reduction': entropy_reduction,
                 'kl_divergence': kl_divergence,
-                'normalization_constant': norm_constant
+                'normalization_constant': norm_constant,
+                'manual_calculation_check': {
+                    'prior_x_lr': (current_probs * lr_values).tolist(),
+                    'sum_for_normalization': norm_constant,
+                    'final_probabilities': new_probs.tolist()
+                }
             }
             calculation_steps.append(step_info)
             

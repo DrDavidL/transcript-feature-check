@@ -107,6 +107,34 @@ numpy
 4. **Normalization**: Divide by sum to ensure probabilities sum to 1
 5. **Posterior Probabilities**: Updated beliefs (q)
 
+### Mathematical Implementation Details
+
+**Current Approach:**
+```
+posterior ∝ prior × LR_value
+posterior = (prior × LR) / Σ(prior × LR)
+```
+
+**Important Note:** This implementation treats LR values as relative evidence weights rather than true statistical likelihood ratios. This approach is mathematically sound when:
+- LR values represent relative diagnostic strength
+- Values > 1 indicate evidence supporting the diagnosis
+- Values < 1 indicate evidence against the diagnosis
+- Values = 1 indicate neutral evidence
+
+**For Manual Verification:**
+To manually verify calculations:
+1. Multiply each prior probability by its corresponding LR value
+2. Sum all products to get the normalization constant
+3. Divide each product by the normalization constant
+4. Results should match the application output
+
+**Example Calculation:**
+For feature "Patient Has: food gets stuck" with uniform priors (0.125):
+- Gastroesophageal: 0.125 × 6.0 = 0.75
+- Cardiovascular: 0.125 × 0.3 = 0.0375
+- Sum all products = 1.4625
+- Final probability = 0.75 / 1.4625 = 0.513 (51.3%)
+
 ### Information Theory Metrics
 - **Entropy**: Measures uncertainty in probability distribution
 - **KL Divergence**: Measures information gained from belief updating
