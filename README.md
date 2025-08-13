@@ -18,31 +18,43 @@ This application processes clinical transcripts to assess features and perform s
 
 ## Workflow
 
-### Step 1: Upload Feature-LR Matrix
-Upload a CSV or Excel file with:
+### Step 1: Upload Feature-LR Matrices
+Upload one or more CSV or Excel files with different LR configurations (tiers/groupings):
 - **First column**: Clinical features (e.g., "Patient Has: food gets stuck")
 - **Remaining columns**: Diagnostic categories with likelihood ratio values
+- **Multiple files**: Each file represents a different LR configuration for comparative analysis
 
-### Step 2: Set Prior Probabilities
+### Step 2: Set Prior Probabilities for Each Matrix
 **For Multiple Diagnostic Categories**: Enter prior probabilities for each category. Values must sum to 1.0.
 
 **For Single Diagnostic Category**: Enter the pretest probability (any positive value, e.g., 0.35 for 35%). The system will use binary Bayesian updating (target diagnosis vs. "everything else").
 
-### Step 3: Upload Transcripts
-Upload PDF transcript files for analysis.
+**Multiple Matrices**: Set separate prior probabilities for each uploaded LR matrix, allowing comparison across different prior assumptions.
 
-### Step 4: Generate Reports
+### Step 3: Upload Transcripts
+Upload PDF, TXT, or DOCX transcript files for analysis.
+
+### Step 4: Generate Comprehensive Reports
 The system will:
-1. Extract text from PDFs
+1. Extract text from uploaded files (PDF, TXT, DOCX)
 2. Use LLM to assess which features are addressed (1/0)
-3. Apply likelihood ratios for addressed features
-4. Perform sequential belief updating
-5. Calculate KL divergence and entropy reduction
-6. Generate enhanced DOCX reports
+3. Apply likelihood ratios for addressed features across all LR matrices
+4. Perform sequential belief updating for each matrix
+5. Calculate KL divergence and entropy reduction for each configuration
+6. Generate comprehensive DOCX reports comparing all LR matrices for each transcript
 
 ## Output Reports
 
-Each DOCX report includes:
+Each comprehensive DOCX report includes:
+
+### Executive Summary
+- Comparison table across all LR matrices
+- Features addressed count for each matrix
+- Entropy reduction and KL divergence metrics
+- Top diagnosis for each matrix configuration
+
+### Detailed Analysis for Each LR Matrix
+For each uploaded LR matrix, the report contains:
 
 ### 1. Feature Assessment Summary
 - Total features assessed
@@ -120,11 +132,20 @@ numpy
 
 ### Mathematical Implementation Details
 
-**For Multiple Categories:**
+**For Multiple Categories (Updated - Normalized Odds Approach):**
 ```
-posterior ∝ prior × LR_value
-posterior = (prior × LR) / Σ(prior × LR)
+For each category i:
+1. odds_i = prior_i / (1 - prior_i)
+2. posterior_odds_i = odds_i × LR_i
+3. unnormalized_prob_i = posterior_odds_i / (1 + posterior_odds_i)
+4. posterior_i = unnormalized_prob_i / Σ(unnormalized_prob_i)
 ```
+
+**Clinical Benefits of Odds Approach:**
+- More conservative probability estimates
+- Maintains diagnostic uncertainty longer
+- Allows later features to have meaningful impact
+- Follows clinical expert recommendations
 
 **For Single Category (Binary Updating):**
 ```
