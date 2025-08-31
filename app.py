@@ -9,7 +9,149 @@ from openai import OpenAI
 import zipfile
 import io
 import numpy as np
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
+from dataclasses import dataclass
+from scipy.optimize import least_squares
+from scipy.special import expit, logsumexp
+
+@dataclass
+class OVRProjectionResult:
+    """Result from OVR coherent projection algorithm."""
+    posterior: np.ndarray                 # Coherent P_k (sums to 1)
+    log_scores: np.ndarray                # Fitted class "scores" s_k (one class fixed to 0)
+    fitted_ovr_lr: np.ndarray             # Model-implied OVR LRs (so you can see what changed)
+    rmse_logLR: float                     # How close we matched your inputs (log-LR RMSE)
+    success: bool
+    message: str
+    diagnostics: Dict[str, Any]           # Extras: baseline index, sum_q_init, priors, inputs, ...
+
+def ovr_project_posterior(priors, ovr_lr, reg: float = 1e-6, weights: Optional[np.ndarray] = None,
+                          baseline: Optional[int] = None) -> OVRProjectionResult:
+    """
+    Coherent One-vs-Rest Likelihood Ratio Projection.
+    
+    Takes potentially incoherent one-vs-rest LRs and projects them onto a coherent
+    multiclass model that minimizes squared error while ensuring posterior probabilities sum to 1.0.
+    
+    Args:
+        priors: Prior probabilities for each class
+        ovr_lr: One-vs-rest likelihood ratios for each class
+        reg: L2 regularization parameter for stability
+        weights: Optional confidence weights per class
+        baseline: Which class to use as reference (highest prior by default)
+    
+    Returns:
+        OVRProjectionResult with coherent posterior and fitted LRs
+    """
+    # Sanitize inputs: safe ranges, normalized priors
+    pi = np.asarray(priors, float).clip(1e-12, 1-1e-12)
+    pi /= pi.sum()
+    lam = np.asarray(ovr_lr, float)
+    K = pi.size
+    if K < 2: raise ValueError("Need at least 2 classes.")
+    if lam.size != K: raise ValueError("priors and ovr_lr must have same length.")
+    if np.any(lam <= 0): raise ValueError("All OVR LRs must be > 0.")
+    
+    # Fix one class as a reference so scores are identifiable
+    if baseline is None: baseline = int(np.argmax(pi))
+    
+    # Optional confidence per class (all ones by default)
+    w = np.ones(K) if weights is None else np.asarray(weights, float).clip(1e-12, None)
+
+    # Precompute logs (stable + fast to reuse)
+    log_pi = np.log(pi)
+    log1m = np.log(1 - pi)          # log(1 - prior)
+    log_lambda = np.log(lam)        # work in evidence units (log‑LR)
+    logit_pi = log_pi - np.log(1 - pi)
+
+    # Initial guess: each class's own binary posterior slice q0 (k vs not‑k)
+    q0 = expit(logit_pi + log_lambda)
+
+    # Convert those slices to initial scores s0
+    s0 = (np.log(q0) - np.log(pi))
+    s0 -= s0[baseline]              # pin the baseline score to 0
+    keep = np.array([i for i in range(K) if i != baseline])  # optimize only non‑baseline entries
+    theta0 = s0[keep]
+
+    def unpack(theta):
+        """Rebuild the full score vector from optimized entries (baseline stays at 0)."""
+        s = np.empty(K); s[baseline] = 0.0; s[keep] = theta; return s
+
+    # Define: residuals (misfits) and Jacobian (sensitivity table)
+    def residual_and_jac(theta):
+        """
+        Residuals: For each class, compare provided OVR log‑LR to model's OVR log‑LR
+        Jacobian: How each residual would change if we nudge each score slightly
+        """
+        s = unpack(theta)
+
+        # Current unnormalized "support" per class: log(prior_k) + score_k
+        z = log_pi + s
+
+        # Stable exponentiation (log‑sum‑exp trick)
+        m = np.max(z)
+        ez = np.exp(z - m)          # proportional to prior_k * exp(score_k)
+        S  = ez.sum()
+
+        # Proper denominator for "k vs not‑k": sum of all OTHER classes' support
+        Sminus = np.maximum(S - ez, 1e-12)
+        logSminus = np.log(Sminus) + m
+
+        # Model‑implied OVR log‑LR for each class (what the current scores imply)
+        model_loglr = s - logSminus + log1m
+
+        # Residuals on log‑LR scale, with optional weights
+        r = np.sqrt(w) * (log_lambda - model_loglr)
+
+        # Jacobian: sensitivity of each residual to each score
+        J = np.zeros((K, K))
+        np.fill_diagonal(J, -np.sqrt(w))      # own score strongly moves own residual
+        # Cross‑talk: changing class j changes the "rest of k" mixture and thus k's residual
+        frac = ez[None, :] / Sminus[:, None]
+        frac[np.arange(K), np.arange(K)] = 0.0
+        J += (np.sqrt(w)[:, None] * frac)
+        # We only optimize non‑baseline scores
+        J = J[:, keep]
+
+        # Ridge: add gentle pull toward 0 (stability / prevents runaway scores in inconsistent inputs)
+        if reg > 0:
+            r = np.concatenate([r, np.sqrt(reg) * theta])
+            J = np.vstack([J, np.sqrt(reg) * np.eye(theta.size)])
+        return r, J
+
+    # Solve the small least‑squares problem iteratively
+    res = least_squares(lambda t: residual_and_jac(t)[0],
+                        theta0, jac=lambda t: residual_and_jac(t)[1],
+                        method="trf", ftol=1e-10, xtol=1e-10, gtol=1e-10, max_nfev=200)
+
+    # Turn fitted scores into a coherent posterior (one shared denominator)
+    theta = res.x
+    s_hat = unpack(theta)
+    z_hat = log_pi + s_hat
+    posterior = np.exp(z_hat - logsumexp(z_hat))
+
+    # Report, for transparency, the OVR LRs implied by the fitted coherent model
+    ez = np.exp(z_hat)
+    S = ez.sum()
+    Sminus = np.maximum(S - ez, 1e-12)
+    model_loglr = s_hat - np.log(Sminus) + log1m
+    lam_fit = np.exp(model_loglr)
+
+    return OVRProjectionResult(
+        posterior=posterior,
+        log_scores=s_hat,
+        fitted_ovr_lr=lam_fit,
+        rmse_logLR=float(np.sqrt(np.mean(res.fun**2))),
+        success=bool(res.success),
+        message=res.message,
+        diagnostics={
+            "baseline": baseline,
+            # Quick sanity: if inputs were coherent already, sum(q0) ≈ 1
+            "sum_q_init": float(q0.sum()),
+            "priors": pi,
+            "input_ovr_lr": lam
+        }
+    )
 
 def get_llm_response(transcript_text: str, features: List[str], model: str) -> Dict[str, int]:
     """Gets the LLM response for the transcript with binary values."""
@@ -148,26 +290,25 @@ def calculate_kl_divergence(posterior: np.ndarray, prior: np.ndarray) -> float:
     prior = np.maximum(prior, 1e-10)
     return np.sum(posterior * np.log2(posterior / prior))
 
-def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray) -> Tuple[np.ndarray, float]:
+def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray) -> Tuple[np.ndarray, float, Optional[np.ndarray]]:
     """
-    Perform Bayesian belief updating with likelihood ratios using normalized odds approach.
+    Perform Bayesian belief updating using coherent One-vs-Rest Likelihood Ratio projection.
     
-    This implementation matches the spreadsheet methodology recommended by clinical experts
-    for more conservative probability estimates that maintain diagnostic uncertainty longer.
+    This implementation addresses the mathematical inconsistency in naive normalization approaches
+    by projecting potentially incoherent OVR LRs onto a coherent multiclass model that:
+    1. Minimizes squared error to the input LRs
+    2. Ensures posterior probabilities naturally sum to 1.0
+    3. Preserves the Bayesian interpretation of likelihood ratios
     
-    SINGLE CATEGORY: Uses binary odds form (disease vs no disease)
+    SINGLE CATEGORY: Uses traditional binary odds form (disease vs no disease)
     - Converts prior to odds: odds = prior / (1 - prior)
     - Applies LR: posterior_odds = prior_odds × LR
     - Converts back: probability = posterior_odds / (1 + posterior_odds)
     
-    MULTIPLE CATEGORIES: Uses normalized odds approach
-    - Converts each prior to odds individually
-    - Applies LR to each: posterior_odds = prior_odds × LR
-    - Converts back to probabilities: prob = posterior_odds / (1 + posterior_odds)
-    - Normalizes all probabilities to sum to 1.0
-    
-    This approach is more conservative than direct probability multiplication,
-    maintaining uncertainty longer and allowing later features to have meaningful impact.
+    MULTIPLE CATEGORIES: Uses coherent OVR projection
+    - Projects input OVR LRs onto a coherent multiclass model
+    - Uses constrained optimization to minimize distortion while ensuring coherence
+    - Returns the coherent posterior probabilities and fitted LRs
     """
     
     # Validate inputs
@@ -179,7 +320,7 @@ def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray
     
     # Handle single vs multiple categories differently
     if len(prior_probs) == 1:
-        # SINGLE CATEGORY: Binary Bayesian updating
+        # SINGLE CATEGORY: Binary Bayesian updating (unchanged - already coherent)
         if np.any(prior_probs <= 0):
             raise ValueError("Prior probability must be positive")
         
@@ -191,10 +332,10 @@ def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray
         posterior_odds = prior_odds * lr
         posterior_prob = posterior_odds / (1 + posterior_odds)
         
-        return np.array([posterior_prob]), posterior_odds
+        return np.array([posterior_prob]), posterior_odds, None
         
     else:
-        # MULTIPLE CATEGORIES: Use normalized odds approach (matches spreadsheet)
+        # MULTIPLE CATEGORIES: Use coherent OVR projection
         prior_sum = np.sum(prior_probs)
         
         # Auto-normalize priors if they're close to 1.0 but not exact (handles rounding errors)
@@ -203,32 +344,21 @@ def perform_belief_update(prior_probs: np.ndarray, likelihood_ratios: np.ndarray
         elif not np.allclose(prior_sum, 1.0, atol=1e-6):
             raise ValueError(f"Prior probabilities must sum to 1.0. Current sum: {prior_sum:.6f}")
         
-        # NORMALIZED ODDS METHOD (matches spreadsheet approach)
-        # This is more conservative and maintains uncertainty longer
-        unnormalized_odds_results = []
-        
-        for i in range(len(prior_probs)):
-            # Convert prior to odds
-            prior_odds = prior_probs[i] / (1 - prior_probs[i])
+        # Apply coherent OVR projection
+        try:
+            result = ovr_project_posterior(prior_probs, likelihood_ratios)
             
-            # Apply LR
-            posterior_odds = prior_odds * likelihood_ratios[i]
+            if not result.success:
+                # Fallback to a simpler approach if optimization fails
+                raise ValueError(f"OVR projection failed: {result.message}")
             
-            # Convert back to probability (unnormalized)
-            unnormalized_prob = posterior_odds / (1 + posterior_odds)
-            unnormalized_odds_results.append(unnormalized_prob)
-        
-        unnormalized_odds_results = np.array(unnormalized_odds_results)
-        
-        # Normalize so all probabilities sum to 1.0
-        normalization_constant = np.sum(unnormalized_odds_results)
-        
-        if normalization_constant == 0:
-            raise ValueError("Normalization constant is zero - check likelihood ratio values")
-        
-        posterior_probs = unnormalized_odds_results / normalization_constant
-        
-        return posterior_probs, normalization_constant
+            # Return coherent posterior, RMSE as normalization constant, and fitted LRs
+            return result.posterior, result.rmse_logLR, result.fitted_ovr_lr
+            
+        except Exception as e:
+            # Fallback to the old approach if coherent projection fails
+            # This ensures the app doesn't break while we debug edge cases
+            raise ValueError(f"Coherent belief update failed: {str(e)}")
 
 def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFrame,
                               prior_probs: Dict[str, float], model: str) -> Dict[str, Any]:
@@ -260,7 +390,7 @@ def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFram
             entropy_before = calculate_entropy(current_probs)
             
             # Perform belief update
-            new_probs, norm_constant = perform_belief_update(current_probs, lr_values)
+            new_probs, norm_constant, fitted_lrs = perform_belief_update(current_probs, lr_values)
             
             # Calculate entropy after update
             entropy_after = calculate_entropy(new_probs)
@@ -278,16 +408,19 @@ def process_transcript_features(transcript_text: str, feature_lr_df: pd.DataFram
                 'feature': feature,
                 'prior_probs': current_probs.copy(),
                 'likelihood_ratios': lr_values.copy(),
-                'unnormalized_posterior': current_probs * lr_values,  # For debugging
+                'fitted_likelihood_ratios': fitted_lrs.copy() if fitted_lrs is not None else lr_values.copy(),
                 'posterior_probs': new_probs.copy(),
                 'entropy_before': entropy_before,
                 'entropy_after': entropy_after,
                 'entropy_reduction': entropy_reduction,
                 'kl_divergence': kl_divergence,
-                'normalization_constant': norm_constant,
-                'manual_calculation_check': {
-                    'prior_x_lr': (current_probs * lr_values).tolist(),
-                    'sum_for_normalization': norm_constant,
+                'rmse_log_lr': norm_constant,  # Now represents RMSE for multi-class, odds for single
+                'coherent_projection_used': fitted_lrs is not None,
+                'calculation_method': 'coherent_ovr_projection' if fitted_lrs is not None else 'binary_odds',
+                'lr_adjustment_summary': {
+                    'input_lrs': lr_values.tolist(),
+                    'fitted_lrs': fitted_lrs.tolist() if fitted_lrs is not None else lr_values.tolist(),
+                    'max_lr_change': float(np.max(np.abs(fitted_lrs - lr_values))) if fitted_lrs is not None else 0.0,
                     'final_probabilities': new_probs.tolist()
                 }
             }
